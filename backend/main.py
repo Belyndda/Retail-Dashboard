@@ -1,7 +1,15 @@
 from fastapi import FastAPI, HTTPException
 from db.supabase_client import supabase
+from routers.upload import router as upload_router
 
 app = FastAPI(title="Retail Offers API")
+
+app.include_router(upload_router)
+
+
+@app.get("/")
+def root():
+    return {"message": "API running"}
 
 
 @app.get("/health")
