@@ -14,10 +14,31 @@ def parse_product_text(raw_text: str) -> dict:
         input=[
             {
                 "role": "system",
-                "content": (
-                    "Extract retail product data from messy text. "
-                    "Return only valid JSON matching the schema."
-                ),
+                "content": """
+You are a retail product data cleaning assistant.
+
+Extract ONE product offer from messy text.
+
+Return only valid JSON matching the schema.
+
+Rules:
+- Complete obvious partial retail names.
+- Fix spacing and typos.
+- Example: "CanonG7X" should become "Canon PowerShot G7 X".
+- Example: "IPhone 16 Pro Max" should become "iPhone 16 Pro Max".
+- Do not duplicate the brand inside product_name.
+- product_name should be the clean product name without brand repeated.
+- normalized_name should be lowercase and searchable.
+- For Apple products, brand must be "Apple", not "iPhone".
+- For Canon G7X, brand must be "Canon".
+- Ignore used, refurbished, renewed, pre-owned, or open-box wording.
+- Convert prices like "1k" to 1000.
+- Convert "$300" to 300.
+- Extract quantity when mentioned.
+- If no quantity is mentioned, use 1.
+- If no unit is mentioned, use "each".
+- Use null when unknown.
+"""
             },
             {
                 "role": "user",
@@ -56,5 +77,24 @@ def parse_product_text(raw_text: str) -> dict:
     )
 
     parsed = json.loads(response.output_text)
+
+    if not parsed.get("quantity"):
+        parsed["quantity"] = 1
+
+    if not parsed.get("unit"):
+        parsed["unit"] = "each"
+
+    if parsed.get("product_name"):
+        parsed["product_name"] = parsed["product_name"].strip()
+
+    if parsed.get("brand"):
+        parsed["brand"] = parsed["brand"].strip()
+
+    if not parsed.get("normalized_name") and parsed.get("product_name"):
+        parsed["normalized_name"] = parsed["product_name"].lower().strip()
+
     parsed["raw_json"] = {"original_text": raw_text}
+
     return parsed
+
+

@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from db.supabase_client import supabase
 from services.openai_parser import parse_product_text
-import re
+from services.serp import find_cheapest_retail_result
 
 router = APIRouter(prefix="/upload", tags=["upload"])
 
@@ -12,78 +12,16 @@ class TextUploadRequest(BaseModel):
     user_id: str | None = None
 
 
-def normalize_name(name: str) -> str:
-    return re.sub(r"\s+", " ", name.strip()).lower()
-
-
-def extract_product_from_text(raw_text: str) -> dict:
-    text = raw_text.strip()
-
-    # Only capture price when prefixed with $
-    price_match = re.search(r"\$(\d+(?:\.\d{1,2})?)", text)
-    price = float(price_match.group(1)) if price_match else None
-
-    brand = None
-    for candidate in ["Nike", "Adidas", "Puma", "Jordan", "New Balance"]:
-        if candidate.lower() in text.lower():
-            brand = candidate
-            break
-
-    size_match = re.search(r"size\s*([A-Za-z0-9\.]+)", text, re.IGNORECASE)
-    size = size_match.group(1) if size_match else None
-
-    quantity_match = re.search(r"\bqty\s*(\d+)\b|\bquantity\s*(\d+)\b", text, re.IGNORECASE)
-    quantity = None
-    if quantity_match:
-        quantity = int(quantity_match.group(1) or quantity_match.group(2))
-
-    product_name = text
-
-    if brand:
-        product_name = re.sub(brand, "", product_name, flags=re.IGNORECASE).strip(" -,")
-
-    if size:
-        product_name = re.sub(
-            rf"size\s*{re.escape(size)}",
-            "",
-            product_name,
-            flags=re.IGNORECASE
-        ).strip(" -,")
-
-    if price is not None:
-        product_name = re.sub(r"\$\d+(?:\.\d{1,2})?", "", product_name).strip(" -,")
-
-    if quantity is not None:
-        product_name = re.sub(
-            r"\bqty\s*\d+\b|\bquantity\s*\d+\b",
-            "",
-            product_name,
-            flags=re.IGNORECASE
-        ).strip(" -,")
-
-    product_name = re.sub(r"\s+", " ", product_name).strip(" -,")
-    if not product_name:
-        product_name = text
-
-    return {
-        "brand": brand,
-        "product_name": product_name,
-        "normalized_name": normalize_name(product_name),
-        "size": size,
-        "price": price,
-        "quantity": quantity,
-        "unit": None,
-        "raw_json": {
-            "original_text": raw_text
-        }
-    }
-
-
 @router.post("/text")
 def upload_text(payload: TextUploadRequest):
+    upload_id = None
+    product_id = None
+
     try:
+        safe_user_id = None if payload.user_id in [None, "", "NULL", "null"] else payload.user_id
+
         upload_result = supabase.table("uploads").insert({
-            "user_id": payload.user_id,
+            "user_id": safe_user_id,
             "source_type": "text",
             "raw_text": payload.raw_text,
             "status": "processing"
@@ -93,40 +31,74 @@ def upload_text(payload: TextUploadRequest):
             raise HTTPException(status_code=500, detail="Failed to create upload row")
 
         upload_id = upload_result.data[0]["id"]
-        product = parse_product_text(payload.raw_text)
 
-        
+        product = parse_product_text(payload.raw_text)
 
         product_result = supabase.table("products").insert({
             "upload_id": upload_id,
-            "brand": product["brand"],
-            "product_name": product["product_name"],
-            "normalized_name": product["normalized_name"],
-            "size": product["size"],
-            "price": product["price"],
-            "quantity": product["quantity"],
-            "unit": product["unit"],
-            "raw_json": product["raw_json"]
+            "brand": product.get("brand"),
+            "product_name": product.get("product_name"),
+            "normalized_name": product.get("normalized_name"),
+            "size": product.get("size"),
+            "price": product.get("price"),
+            "quantity": product.get("quantity"),
+            "unit": product.get("unit"),
+            "raw_json": product.get("raw_json"),
+            "serp_status": "pending"
         }).execute()
 
+        if not product_result.data:
+            raise HTTPException(status_code=500, detail="Failed to create product row")
+
+        product_row = product_result.data[0]
+        product_id = product_row["id"]
+
+        print("RUNNING SERP FOR:", product)
+
+        try:
+            serp_result = find_cheapest_retail_result(product)
+            print("SERP RESULT:", serp_result)
+
+            update_result = supabase.table("products").update({
+                "competitor_price": serp_result.get("competitor_price"),
+                "competitor_url": serp_result.get("competitor_url"),
+                "serp_status": serp_result.get("serp_status", "done")
+            }).eq("id", product_id).execute()
+
+            if update_result.data:
+                product_row = update_result.data[0]
+
+        except Exception as serp_error:
+            print("SERP ERROR:", serp_error)
+
+            update_result = supabase.table("products").update({
+                "serp_status": "error"
+            }).eq("id", product_id).execute()
+
+            if update_result.data:
+                product_row = update_result.data[0]
+
         supabase.table("uploads").update({
-            "status": "done"
+            "status": "done",
+            "error_msg": None
         }).eq("id", upload_id).execute()
 
         return {
             "success": True,
             "upload_id": upload_id,
-            "product": product_result.data
+            "product": product_row
         }
 
     except Exception as e:
-        try:
-            if "upload_id" in locals():
+        print("UPLOAD ERROR:", e)
+
+        if upload_id:
+            try:
                 supabase.table("uploads").update({
                     "status": "error",
                     "error_msg": str(e)
                 }).eq("id", upload_id).execute()
-        except:
-            pass
+            except Exception:
+                pass
 
         raise HTTPException(status_code=500, detail=str(e))
