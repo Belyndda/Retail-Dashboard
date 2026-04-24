@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from db.supabase_client import supabase
+from services.openai_parser import parse_product_text
 import re
 
 router = APIRouter(prefix="/upload", tags=["upload"])
@@ -92,8 +93,9 @@ def upload_text(payload: TextUploadRequest):
             raise HTTPException(status_code=500, detail="Failed to create upload row")
 
         upload_id = upload_result.data[0]["id"]
+        product = parse_product_text(payload.raw_text)
 
-        product = extract_product_from_text(payload.raw_text)
+        
 
         product_result = supabase.table("products").insert({
             "upload_id": upload_id,
@@ -118,4 +120,13 @@ def upload_text(payload: TextUploadRequest):
         }
 
     except Exception as e:
+        try:
+            if "upload_id" in locals():
+                supabase.table("uploads").update({
+                    "status": "error",
+                    "error_msg": str(e)
+                }).eq("id", upload_id).execute()
+        except:
+            pass
+
         raise HTTPException(status_code=500, detail=str(e))

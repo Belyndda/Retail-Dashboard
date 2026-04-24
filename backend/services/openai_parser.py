@@ -1,43 +1,60 @@
-from typing import List, Dict
-import re
+import os
+import json
+from dotenv import load_dotenv
+from openai import OpenAI
+
+load_dotenv()
+
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 
-def normalize_name(name: str) -> str:
-    return re.sub(r"\s+", " ", name.strip()).lower()
+def parse_product_text(raw_text: str) -> dict:
+    response = client.responses.create(
+        model="gpt-4.1-mini",
+        input=[
+            {
+                "role": "system",
+                "content": (
+                    "Extract retail product data from messy text. "
+                    "Return only valid JSON matching the schema."
+                ),
+            },
+            {
+                "role": "user",
+                "content": raw_text,
+            },
+        ],
+        text={
+            "format": {
+                "type": "json_schema",
+                "name": "product_extract",
+                "schema": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "brand": {"type": ["string", "null"]},
+                        "product_name": {"type": "string"},
+                        "normalized_name": {"type": ["string", "null"]},
+                        "size": {"type": ["string", "null"]},
+                        "price": {"type": ["number", "null"]},
+                        "quantity": {"type": ["integer", "null"]},
+                        "unit": {"type": ["string", "null"]}
+                    },
+                    "required": [
+                        "brand",
+                        "product_name",
+                        "normalized_name",
+                        "size",
+                        "price",
+                        "quantity",
+                        "unit"
+                    ]
+                },
+                "strict": True
+            }
+        }
+    )
 
-
-def extract_products_from_text(raw_text: str) -> List[Dict]:
-    """
-    Temporary MVP parser.
-    Later replace with OpenAI structured output.
-    """
-    text = raw_text.strip()
-
-    price_match = re.search(r"\$?(\d+(?:\.\d{1,2})?)", text)
-    price = float(price_match.group(1)) if price_match else None
-
-    quantity_match = re.search(r"\b(\d+)\b", text)
-    quantity = int(quantity_match.group(1)) if quantity_match else None
-
-    brand = None
-    for candidate in ["Nike", "Adidas", "Puma", "Jordan", "New Balance"]:
-        if candidate.lower() in text.lower():
-            brand = candidate
-            break
-
-    product_name = text
-    if brand:
-        product_name = re.sub(brand, "", product_name, flags=re.IGNORECASE).strip(" -,")
-
-    item = {
-        "brand": brand,
-        "product_name": product_name or text,
-        "normalized_name": normalize_name(product_name or text),
-        "size": None,
-        "price": price,
-        "quantity": quantity,
-        "unit": None,
-        "raw_json": {"source_text": raw_text},
-    }
-
-    return [item]
+    parsed = json.loads(response.output_text)
+    parsed["raw_json"] = {"original_text": raw_text}
+    return parsed
